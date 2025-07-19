@@ -84,37 +84,42 @@ main() {
     log "Starting GitHub → Gitea migration..."
     check_dependencies
 
-    [[ -z "$GITHUB_USERNAME" || -z "$GITHUB_TOKEN" || -z "$GITEA_URL" || -z "$GITEA_TOKEN" ]] && {
-        error "Missing required env vars"; exit 1; }
+    [[ -z "$GITHUB_USERNAME" || -z "$GITHUB_TOKEN" \
+       || -z "$GITEA_URL" || -z "$GITEA_TOKEN" ]] && {
+        error "Missing required env vars"; exit 1
+    }
 
     mkdir -p "$WORK_DIR"
 
-    log "Fetching repositories from GitHub..."
+    log "Fetching repositories from GitHub…"
     local all_repos="[]"
     local page=1
+
     while :; do
         local resp
         resp=$(curl -s \
             -H "Authorization: token $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/user/repos?page=$page&per_page=100&type=owner&sort=updated")
-        [[ $(jq -r 'length' <<< "$resp") -eq 0 ]] && break
-        all_repos=$(jq -s '.[0] + .[1]' <<< "$all_repos"$'\n'"$resp")
+            "https://api.github.com/user/repos?page=$page&per_page=100&affiliation=owner&sort=updated")
+        [[ $(jq -r 'length' <<<"$resp") -eq 0 ]] && break
+        all_repos=$(jq -s '.[0] + .[1]' <<<"$all_repos"$'\n'"$resp")
         ((page++))
     done
 
-    local repo_count; repo_count=$(jq length <<< "$all_repos")
+    local repo_count
+    repo_count=$(jq length <<<"$all_repos")
     log "Found $repo_count repositories to migrate"
 
     local success=0 errors=0
-    echo "$all_repos" | jq -c '.[]' | {
+
     while IFS= read -r repo_line; do
-        mirror_repository "$repo_line" && ((success++)) || ((errors++))
-    done
-    log "Migration complete: $success OK, $errors failed"
-}
+        mirror_repository "$repo_line" \
+            && ((success++)) \
+            || ((errors++))
+    done < <(jq -c '.[]' <<<"$all_repos")
 
     rm -rf "$WORK_DIR"
+    log "Migration complete: $success OK, $errors failed"
 }
 
 main "$@"
