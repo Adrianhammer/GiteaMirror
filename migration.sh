@@ -107,12 +107,14 @@ main() {
     log "Found $repo_count repositories to migrate"
 
     local success=0 errors=0
+    echo "$all_repos" | jq -c '.[]' | {
     while IFS= read -r repo_line; do
         mirror_repository "$repo_line" && ((success++)) || ((errors++))
-    done < <(echo "$all_repos" | jq -c '.[]')
+    done
+    log "Migration complete: $success OK, $errors failed"
+}
 
     rm -rf "$WORK_DIR"
-    log "Migration complete: $success OK, $errors failed"
 }
 
 main "$@"
