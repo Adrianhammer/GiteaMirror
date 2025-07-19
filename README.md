@@ -1,6 +1,6 @@
 <div align="center">
 
-# Adrian Hammer
+# Gitea Mirror 🪞
 
 **work in progress**
 A program that migrates all your repos to gitea running on proxmox.
