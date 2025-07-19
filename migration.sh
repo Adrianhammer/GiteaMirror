@@ -10,230 +10,109 @@ if [ -f .env ]; then
     export $(grep -v '^#' .env | xargs)
 fi
 
-# Configuration - UPDATE THESE VALUES
+# Configuration – set in .env or edit below
 GITHUB_USERNAME="${GITHUB_USERNAME}"
 GITHUB_TOKEN="${GITHUB_TOKEN}"
-GITEA_URL="${GITEA_URL}" 
+GITEA_URL="${GITEA_URL}"
 GITEA_USERNAME="${GITEA_USERNAME}"
 GITEA_TOKEN="${GITEA_TOKEN}"
 
-# Working directory for temporary clones
-WORK_DIR="${WORK_DIR}"
-LOG_FILE="${LOG_FILE}"
+WORK_DIR="${WORK_DIR:-/tmp/gitea_mirror}"
+LOG_FILE="${LOG_FILE:-/tmp/migration.log}"
 
-# Colors for output
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Logging function
-log() {
-    echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1" | tee -a "$LOG_FILE"
-}
+log()   { echo -e "${BLUE}[$(date '+%F %T')]${NC} $1" | tee -a "$LOG_FILE"; }
+error() { echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE"; }
+success() { echo -e "${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE"; }
+warning() { echo -e "${YELLOW}[WARNING]${NC} $1" | tee -a "$LOG_FILE"; }
 
-error() {
-    echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE"
-}
-
-success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1" | tee -a "$LOG_FILE"
-}
-
-warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1" | tee -a "$LOG_FILE"
-}
-
-# Check if required tools are installed
 check_dependencies() {
-    local deps=("curl" "git" "jq")
-    for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &> /dev/null; then
-            error "$dep is not installed. Please install it first."
-            exit 1
-        fi
+    for dep in curl git jq; do
+        command -v "$dep" >/dev/null || { error "$dep not installed"; exit 1; }
     done
 }
 
-# Create Gitea repository
 create_gitea_repo() {
-    local repo_name="$1"
-    local repo_description="$2"
-    local is_private="$3"
-    
-    log "Creating repository '$repo_name' in Gitea..."
-    
-    local response=$(curl -s -w "%{http_code}" -o /tmp/gitea_response.json \
-        -X POST \
-        -H "Authorization: token $GITEA_TOKEN" \
+    local repo_name="$1" desc="$2" private="$3"
+    log "Creating repo '$repo_name' in Gitea..."
+    local payload=$(jq -n \
+        --arg name "$repo_name" \
+        --arg desc "$desc" \
+        --argjson private "$private" \
+        '{name:$name, description:$desc, private:$private, auto_init:false}')
+    local code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X POST -H "Authorization: token $GITEA_TOKEN" \
         -H "Content-Type: application/json" \
-        -d "{
-            \"name\": \"$repo_name\",
-            \"description\": \"$repo_description\",
-            \"private\": $is_private,
-            \"auto_init\": false
-        }" \
+        -d "$payload" \
         "$GITEA_URL/api/v1/user/repos")
-    
-    local http_code="${response: -3}"
-    
-    if [[ "$http_code" == "201" ]]; then
-        success "Repository '$repo_name' created successfully in Gitea"
-        return 0
-    elif [[ "$http_code" == "409" ]]; then
-        warning "Repository '$repo_name' already exists in Gitea"
-        return 0
-    else
-        error "Failed to create repository '$repo_name' in Gitea (HTTP $http_code)"
-        cat /tmp/gitea_response.json
-        return 1
-    fi
+    [[ "$code" == "201" ]] && { success "Created $repo_name"; return 0; }
+    [[ "$code" == "409" ]] && { warning "$repo_name already exists"; return 0; }
+    error "Failed to create $repo_name (HTTP $code)"; return 1
 }
 
-# Get all GitHub repositories
-get_github_repos() {
-    log "Fetching repositories from GitHub..."
-    
-    local page=1
-    local all_repos=""
-    
-    while true; do
-        local response=$(curl -s \
-            -H "Authorization: token $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/user/repos?page=$page&per_page=100&type=owner&sort=updated")
-        
-        local repos=$(echo "$response" | jq -r '.[].name // empty')
-        
-        if [[ -z "$repos" ]]; then
-            break
-        fi
-        
-        all_repos="$all_repos$repos"$'\n'
-        ((page++))
-    done
-    
-    echo "$all_repos" | grep -v '^$'
-}
-
-# Mirror a single repository
 mirror_repository() {
-    local repo_name="$1"
-    local repo_data="$2"
-    
-    log "Processing repository: $repo_name"
-    
-    # Extract repository information
-    local description=$(echo "$repo_data" | jq -r '.description // ""')
-    local is_private=$(echo "$repo_data" | jq -r '.private')
+    local repo_data="$1"
+    local repo_name=$(jq -r '.name' <<< "$repo_data")
+    local desc=$(jq -r '.description // ""' <<< "$repo_data")
+    local private=$(jq -r '.private' <<< "$repo_data")
+
+    log "Processing $repo_name..."
     local clone_url="https://${GITHUB_TOKEN}@github.com/${GITHUB_USERNAME}/${repo_name}.git"
-    local gitea_remote="http://${GITEA_USERNAME}:${GITEA_TOKEN}@${GITEA_URL#http://}/$(echo "$GITEA_USERNAME" | tr '[:upper:]' '[:lower:]')/${repo_name}.git"
-    
-    # Create directory for this repo
+    local gitea_remote="${GITEA_URL}/$(echo "$GITEA_USERNAME" | tr '[:upper:]' '[:lower:]')/${repo_name}.git"
+
+    create_gitea_repo "$repo_name" "$desc" "$private" || return 1
+
     local repo_dir="$WORK_DIR/$repo_name"
     mkdir -p "$repo_dir"
     cd "$repo_dir"
-    
-    # Create repository in Gitea first
-    if ! create_gitea_repo "$repo_name" "$description" "$is_private"; then
-        error "Failed to create repository in Gitea, skipping..."
-        return 1
-    fi
-    
-    # Clone from GitHub
-    log "Cloning $repo_name from GitHub..."
-    if ! git clone --mirror "$clone_url" .; then
-        error "Failed to clone $repo_name from GitHub"
-        return 1
-    fi
-    
-    # Push to Gitea
-    log "Pushing $repo_name to Gitea..."
-    if git push --mirror "$gitea_remote"; then
-        success "Successfully mirrored $repo_name to Gitea"
-    else
-        error "Failed to push $repo_name to Gitea"
-        return 1
-    fi
-    
-    # Cleanup
+
+    git clone --mirror "$clone_url" . || { error "Clone failed"; return 1; }
+    git push --mirror "$gitea_remote" || { error "Push failed"; return 1; }
+
+    success "Mirrored $repo_name"
     cd "$WORK_DIR"
     rm -rf "$repo_dir"
 }
 
-# Main migration function
 main() {
-    log "Starting GitHub to Gitea migration..."
-    
-    # Check dependencies
+    log "Starting GitHub → Gitea migration..."
     check_dependencies
-    
-    # Validate configuration
-    if [[ -z "$GITHUB_USERNAME" || "$GITHUB_USERNAME" == "your_github_username" ]]; then
-        error "Please update GITHUB_USERNAME in the script"
-        exit 1
-    fi
-    
-    if [[ -z "$GITHUB_TOKEN" || "$GITHUB_TOKEN" == "your_github_personal_access_token" ]]; then
-        error "Please update GITHUB_TOKEN in the script"
-        exit 1
-    fi
-    
-    if [[ -z "$GITEA_URL" || "$GITEA_URL" == "http://your_gitea_ip:3000" ]]; then
-        error "Please update GITEA_URL in the script"
-        exit 1
-    fi
-    
-    if [[ -z "$GITEA_TOKEN" || "$GITEA_TOKEN" == "your_gitea_access_token" ]]; then
-        error "Please update GITEA_TOKEN in the script"
-        exit 1
-    fi
-    
-    # Create working directory
+
+    [[ -z "$GITHUB_USERNAME" || -z "$GITHUB_TOKEN" || -z "$GITEA_URL" || -z "$GITEA_TOKEN" ]] && {
+        error "Missing required env vars"; exit 1; }
+
     mkdir -p "$WORK_DIR"
-    
-    # Get all repositories from GitHub
-    local repos=$(get_github_repos)
-    local repo_count=$(echo "$repos" | wc -l)
-    
+
+    log "Fetching repositories from GitHub..."
+    local all_repos="[]"
+    local page=1
+    while :; do
+        local resp
+        resp=$(curl -s \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/user/repos?page=$page&per_page=100&type=owner&sort=updated")
+        [[ $(jq -r 'length' <<< "$resp") -eq 0 ]] && break
+        all_repos=$(jq -s '.[0] + .[1]' <<< "$all_repos"$'\n'"$resp")
+        ((page++))
+    done
+
+    local repo_count; repo_count=$(jq length <<< "$all_repos")
     log "Found $repo_count repositories to migrate"
-    
-    # Process each repository
-    local success_count=0
-    local error_count=0
-    
-    while IFS= read -r repo_name; do
-        if [[ -n "$repo_name" ]]; then
-            # Get detailed repo info
-            local repo_data=$(curl -s \
-                -H "Authorization: token $GITHUB_TOKEN" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/${GITHUB_USERNAME}/${repo_name}")
-            
-            if mirror_repository "$repo_name" "$repo_data"; then
-                ((success_count++))
-            else
-                ((error_count++))
-            fi
-        fi
-    done <<< "$repos"
-    
-    # Cleanup working directory
+
+    local success=0 errors=0
+    while IFS= read -r repo_line; do
+        mirror_repository "$repo_line" && ((success++)) || ((errors++))
+    done < <(echo "$all_repos" | jq -c '.[]')
+
     rm -rf "$WORK_DIR"
-    
-    # Summary
-    log "Migration completed!"
-    log "Successfully migrated: $success_count repositories"
-    log "Errors: $error_count repositories"
-    
-    if [[ $error_count -gt 0 ]]; then
-        warning "Some repositories failed to migrate. Check the log file: $LOG_FILE"
-        exit 1
-    else
-        success "All repositories migrated successfully!"
-    fi
+    log "Migration complete: $success OK, $errors failed"
 }
 
-# Run the main function
 main "$@"

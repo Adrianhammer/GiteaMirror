@@ -152,12 +152,12 @@ GITEA_TOKEN="xxxxxxxxxxxxxxxxxxxxxxxx"
 
 1. **Make the script executable**:
    ```bash
-   chmod +x github_gitea_migration.sh
+   chmod +x migration.sh
    ```
 
 2. **Run the migration**:
    ```bash
-   ./github_gitea_migration.sh
+   ./migration.sh
    ```
 
 3. **Monitor the progress** in the terminal and check the log file at `/var/log/github_gitea_migration.log`
