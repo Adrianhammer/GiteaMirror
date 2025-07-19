@@ -73,31 +73,25 @@ mirror_repository() {
   desc=$(jq -r '.description // ""' <<<"$repo_json")
   priv=$(jq -r .private <<<"$repo_json")
 
-  log "→ Processing '$name'..."
+  log "→ Processing '$name'…"
   create_gitea_repo "$name" "$desc" "$priv" || return 1
 
-  # prepare clone dir
   local dir="$WORK_DIR/$name"
-  mkdir -p "$dir"
-  # ensure cleanup on exit from this function
-  trap 'rm -rf "$dir"' RETURN
+  # Remove any previous clone
+  rm -rf "$dir"
 
-  # GitHub clone URL with token
-  local gh_url="https://${GITHUB_TOKEN}@github.com/${GITHUB_USERNAME}/${name}.git"
-  # Gitea push URL with token (strip protocol from GITEA_URL)
-  local hostport="${GITEA_URL#*://}"
-  local ga_user="${GITEA_USERNAME,,}"
-  local ga_url="https://${GITEA_USERNAME}:${GITEA_TOKEN}@${hostport}/${ga_user}/${name}.git"
-
-  cd "$dir"
-  git clone --mirror "$gh_url" . \
+  # Clone **into** $dir
+  git clone --mirror "https://${GITHUB_TOKEN}@github.com/${GITHUB_USERNAME}/${name}.git" \
+    "$dir" \
     || { error "Clone failed for '$name'"; return 1; }
 
-  git push --mirror "$ga_url" \
+  # Push from inside that new mirror
+  cd "$dir"
+  git push --mirror \
+    "https://${GITEA_USERNAME}:${GITEA_TOKEN}@${GITEA_URL#*://}/${GITEA_USERNAME,,}/${name}.git" \
     || { error "Push failed for '$name'"; return 1; }
 
   success "Mirrored '$name'"
-  return 0
 }
 
 # --- Main --------------------------------------------------
