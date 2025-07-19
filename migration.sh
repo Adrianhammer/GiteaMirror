@@ -69,6 +69,7 @@ create_gitea_repo() {
 mirror_repository() {
   local repo_json="$1"
   local name desc priv
+
   name=$(jq -r .name <<<"$repo_json")
   desc=$(jq -r '.description // ""' <<<"$repo_json")
   priv=$(jq -r .private <<<"$repo_json")
@@ -76,19 +77,31 @@ mirror_repository() {
   log "→ Processing '$name'…"
   create_gitea_repo "$name" "$desc" "$priv" || return 1
 
+  # Prepare a clean mirror dir
   local dir="$WORK_DIR/$name"
-  # Remove any previous clone
   rm -rf "$dir"
+  mkdir -p "$dir"
 
-  # Clone **into** $dir
-  git clone --mirror "https://${GITHUB_TOKEN}@github.com/${GITHUB_USERNAME}/${name}.git" \
+  # Clone the GitHub mirror into $dir
+  git clone --mirror \
+    "https://${GITHUB_TOKEN}@github.com/${GITHUB_USERNAME}/${name}.git" \
     "$dir" \
     || { error "Clone failed for '$name'"; return 1; }
 
-  # Push from inside that new mirror
   cd "$dir"
-  git push --mirror \
-    "https://${GITEA_USERNAME}:${GITEA_TOKEN}@${GITEA_URL#*://}/${GITEA_USERNAME,,}/${name}.git" \
+
+  # Build a push URL that preserves GITEA_URL's scheme (http:// or https://)
+  # and injects your Gitea username/token credentials
+  # e.g. http://username:token@192.168.1.119:3000/adrianhammer/Repo.git
+  local push_url
+  # strip trailing slash
+  local base="${GITEA_URL%/}"
+  # inject credentials after the "://"
+  push_url="${base/\/\//\/\/${GITEA_USERNAME}:${GITEA_TOKEN}@}"
+  # append path
+  push_url="${push_url}/${GITEA_USERNAME,,}/${name}.git"
+
+  git push --mirror "$push_url" \
     || { error "Push failed for '$name'"; return 1; }
 
   success "Mirrored '$name'"
