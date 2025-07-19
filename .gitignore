@@ -1,0 +1,9 @@
+# Ignore environment config
+.env
+
+# Ignore logs
+*.log
+/var/log/github_gitea_migration.log
+
+# Ignore temporary migration folders
+/tmp/github_migration/
